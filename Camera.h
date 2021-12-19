@@ -2,7 +2,7 @@
 
 #include <linux/videodev2.h>
 
-enum class CameraError {
+enum class CameraError {		// TODO: Make these numbers make sense.
 	none = 0,
 	statusInfo = -1,
 	fileNotDevice = -2,
@@ -12,16 +12,22 @@ enum class CameraError {
 	deviceNoVideo = -6,
 	deviceNoStreaming = -7,
 	deviceGetFormat = -8,
-	deviceNoMMap = -9,
-	deviceRequestBuffer = -10,
-	deviceInsufficientMemory = -11,
-	userInsufficientMemory = -12,
-	deviceQueryBuf = -13,
-	mMapFailed = -14,
-	deviceMemFree = -15,
-	deviceGetParm = -16,
-	deviceSetParm = -17,
-	deviceNoCustomFPS = -18
+	deviceSetFormat = -9,
+	deviceFormatUnsupported = -10,
+	deviceNoMMap = -10,
+	deviceRequestBuffer = -11,
+	deviceInsufficientMemory = -12,
+	userInsufficientMemory = -13,
+	deviceQueryBuf = -14,
+	mMapFailed = -15,
+	deviceMemFree = -16,
+	deviceGetParm = -17,
+	deviceSetParm = -18,
+	deviceNoCustomFPS = -19,
+	deviceStart = -20,
+	deviceStop = -21,
+	deviceShootQBuf = -22,
+	deviceShootDQBuf = -23
 };
 
 class Camera {
@@ -35,6 +41,8 @@ public:
 	struct v4l2_requestbuffers buffers;
 
 	BufferLocation* bufferLocations;
+
+	void* data();		// Getter for frame data.
 	
 	Camera(const char* deviceName);
 
@@ -51,6 +59,9 @@ public:
 	CameraError setFPS();					// Needs to run after open(), can run before init().
 	uint32_t getFPS(CameraError& error);			// getFPS only yields round FPS values. If FPS is non-integer, rounds down.
 	uint32_t getFPS();
+
+	CameraError start();					// Needs to run after open() and after init(). TODO: See if setFPS can be run after start correctly.
+	CameraError stop();
 
 	CameraError free();
 
