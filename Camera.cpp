@@ -1,3 +1,4 @@
+#include <iostream>
 #include "Camera.h"
 
 #include <stdlib.h>
@@ -7,6 +8,11 @@
 #include <strings.h>
 #include <sys/mman.h>
 #include <cstdint>
+#include <poll.h>
+#include <utility>
+#include <cstddef>
+#include <cerrno>
+#include <sys/ioctl.h>
 
 #include <linux/videodev2.h>
 
@@ -17,16 +23,16 @@ int interruptedIoctl(int fd, unsigned long request, void* argp) {
 	return returnValue;
 }
 
-void* data() { return bufferLocations[0].start; }
+void* Camera::data() { return bufferLocations[0].start; }
 
 Camera::Camera(const char* deviceName) : deviceName(deviceName) {
-	bzero(*buffers, sizeof(buffers));
+	bzero(&buffers, sizeof(buffers));
 	buffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	buffers.count = 0;
 	buffers.memory = V4L2_MEMORY_MMAP;
 }
 
-Camera::Camera(Camera&& other) {
+Camera& Camera::operator=(Camera&& other) {
 	deviceName = other.deviceName;
 	fd = other.fd;
 	format = other.format;
@@ -35,9 +41,11 @@ Camera::Camera(Camera&& other) {
 
 	other.buffers.count = 0;
 	other.fd = -1;
+
+	return *this;
 }
 
-Camera& Camera::operator=(Camera&& other) { this->Camera(std::move(other)); return *this; }
+Camera::Camera(Camera&& other) { *this = std::move(other); }
 
 CameraError Camera::open() {
 	struct stat st;			// I think struct is necessary here because compiler interprets as stat() function otherwise.
@@ -45,11 +53,13 @@ CameraError Camera::open() {
 	if (!S_ISCHR(st.st_mode)) { return CameraError::fileNotDevice; }
 	fd = ::open(deviceName, O_RDWR | O_NONBLOCK);
 	if (fd == -1) { return CameraError::cannotOpen; }
+	pollStruct.fd = fd;
+	pollStruct.events = POLLIN;
 	return CameraError::none;
 }
 
 
-CameraError Camera::init() {
+CameraError Camera::init(uint32_t pixelFormat, uint32_t field) {
 	struct v4l2_capability cap;			// This has struct because tells reader that v4l2_* are structs and not other types. Design choice.
 
 	// Get device capability information and get and set device format information.
@@ -59,14 +69,16 @@ CameraError Camera::init() {
 	if (!(cap.capabilities & V4L2_CAP_STREAMING)) { return CameraError::deviceNoStreaming; }	// See if device supports streaming with shared memory.
 	// NOTE: using mmap or userptr with V4L2 is supposed to be way faster than doing reads and writes to the dev file, which is why we're using mmap.
 	
-	bzero(*format, sizeof(format));				// TODO: I don't know if this is necessary. If it isn't, remove it.
+	bzero(&format, sizeof(format));				// TODO: I don't know if this is necessary. If it isn't, remove it.
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (interruptedIoctl(fd, VIDIOC_G_FMT, &format) == -1) { return CameraError::deviceGetFormat; }		// Get default format.
-	format.pix.pixelFormat = V4L2_PIX_FMT_RGB24;								// Change to our liking.
-	format.pix.field = V4L2_FIELD_NONE;
+	std::cout << format.fmt.pix.pixelformat << " " << format.fmt.pix.field << std::endl;
+	if (format.fmt.pix.pixelformat == V4L2_PIX_FMT_RGB32) { std::cout << "passed check" << std::endl; }
+	format.fmt.pix.pixelformat = pixelFormat;								// Change to our liking.
+	format.fmt.pix.field = field;
 	if (interruptedIoctl(fd, VIDIOC_S_FMT, &format) == -1) { return CameraError::deviceSetFormat; }
 	// If driver changed one of our changes, it doesn't support it.
-	if (format.pix.pixelFormat != V4L2_PIX_FMT_RGB24 || format.pix.field != V4L2_FIELD_NONE) { return CameraError::deviceFormatUnsupported; }
+	if (format.fmt.pix.pixelformat != pixelFormat || format.fmt.pix.field != field) { return CameraError::deviceFormatUnsupported; }
 	// If nothing was changed, then format is a valid representation of the current device format, so no need to get anything else.
 
 	// Initialize shared memory.
@@ -78,7 +90,7 @@ CameraError Camera::init() {
 	if (!bufferLocations) { return CameraError::userInsufficientMemory; }
 	for (int i = 0; i < buffers.count; i++) {	// TODO: If we're only using the first bufferLocation anyway, why set all of them. MMap all locations of course, because we have to, but why are we putting them in our user-side buffer. Don't do that if you don't have to. If that works, don't have an array in the first place.
 		struct v4l2_buffer buf;
-		bzero(*buf, sizeof(buf));
+		bzero(&buf, sizeof(buf));
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_MMAP;
 		buf.index = i;
@@ -93,16 +105,18 @@ CameraError Camera::init() {
 	return CameraError::none;
 }
 
+CameraError Camera::init() { return init(V4L2_PIX_FMT_RGB24, V4L2_FIELD_NONE); }
+
 // NOTE: We would have to worry about the capture standard if we weren't using a modern, digital camera. Since we are, we can set the FPS to whatever we want.
 CameraError Camera::setFPS(uint32_t FPS) {
 	struct v4l2_streamparm parm;
-	bzero(*parm, sizeof(parm));
+	bzero(&parm, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIO_G_PARM, &parm) == -1) { return CameraError::deviceGetParm; }
+	if (interruptedIoctl(fd, VIDIOC_G_PARM, &parm) == -1) { return CameraError::deviceGetParm; }
 	if (parm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) {
 		parm.parm.capture.timeperframe.numerator = 1;
 		parm.parm.capture.timeperframe.denominator = FPS;
-		if (interruptedIoctl(fd, VIDIO_S_PARM, &parm) == -1) { return CameraError::deviceSetParm; }
+		if (interruptedIoctl(fd, VIDIOC_S_PARM, &parm) == -1) { return CameraError::deviceSetParm; }
 		return CameraError::none;
 	}
 	return CameraError::deviceNoCustomFPS;
@@ -110,11 +124,11 @@ CameraError Camera::setFPS(uint32_t FPS) {
 
 uint32_t Camera::getFPS(CameraError& error) {
 	struct v4l2_streamparm parm;
-	bzero(*parm, sizeof(parm));
+	bzero(&parm, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIO_G_PARM, &parm) == -1) { error = CameraError::deviceGetParm; return 0; }
+	if (interruptedIoctl(fd, VIDIOC_G_PARM, &parm) == -1) { error = CameraError::deviceGetParm; return 0; }
 	error = CameraError::none;
-	return parm.capture.timeperframe.denominator / parm.capture.timeperframe.numerator;
+	return parm.parm.capture.timeperframe.denominator / parm.parm.capture.timeperframe.numerator;
 }
 
 uint32_t Camera::getFPS() { CameraError error; return getFPS(error); }
@@ -127,14 +141,16 @@ CameraError Camera::start() {
 
 CameraError Camera::shootFrame() {
 	struct v4l2_buffer buf;			// TODO: Does it make sense to keep creating new ones of these? Can this be optimized? If so, do that.
-	bzero(*buf, sizeof(buf));
+	bzero(&buf, sizeof(buf));
 	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	buf.memory = V4L2_MEMORY_MMAP;
 	buf.index = 0;			// Always use the first one for this.
 	if (interruptedIoctl(fd, VIDIOC_QBUF, &buf) == -1) { return CameraError::deviceShootQBuf; }
 	// TODO: Does buf.index = 0 being set here make a difference for DQBUF?
-	// TODO: Do I need to poll or wait or something before doing DQBUF? Or does it just block until a buffer is available to dequeue?
+	if (poll(&pollStruct, 1, -1) == -1) { return CameraError::userShootPoll; }
+	if (pollStruct.revents & POLLERR) { return CameraError::userShootPoll; }
 	if (interruptedIoctl(fd, VIDIOC_DQBUF, &buf) == -1) { return CameraError::deviceShootDQBuf; }
+	return CameraError::none;
 }
 
 CameraError Camera::stop() {
