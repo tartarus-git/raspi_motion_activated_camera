@@ -23,7 +23,8 @@ int interruptedIoctl(int fd, unsigned long request, void* argp) {
 	return returnValue;
 }
 
-void* Camera::data() { return bufferLocations[0].start; }
+void* Camera::frameData() { return bufferLocations[0].start; }
+size_t Camera::frameSize() { return bufferLocations[0].size; }
 
 Camera::Camera(const char* deviceName) : deviceName(deviceName) {
 	bzero(&buffers, sizeof(buffers));

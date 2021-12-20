@@ -48,7 +48,8 @@ public:
 
 	BufferLocation* bufferLocations;
 
-	void* data();		// Getter for frame data.
+	void* frameData();		// Getter for frame data.
+	size_t frameSize();		// Getter for frame size.
 	
 	Camera(const char* deviceName);
 
