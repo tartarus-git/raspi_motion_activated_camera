@@ -16,6 +16,10 @@
 
 #include <linux/videodev2.h>
 
+// TODO: Add a function that converts general error codes into our error codes. That should be called when you're handling general error codes of every ioctl.
+
+// TODO: Go through everything and check that your removal of bzero at some parts hasn't damaged setting reserved fields to zero, which is a requirement.
+
 int interruptedIoctl(int fd, unsigned long request, void* argp) {
 	int returnValue;
 	do { returnValue = ioctl(fd, request, argp); }
@@ -29,7 +33,6 @@ size_t Camera::frameSize() { return bufferLocations[0].size; }
 Camera::Camera(const char* deviceName) : deviceName(deviceName) {
 	bzero(&buffers, sizeof(buffers));
 	buffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	buffers.count = 0;
 	buffers.memory = V4L2_MEMORY_MMAP;
 }
 
@@ -40,7 +43,7 @@ Camera& Camera::operator=(Camera&& other) {
 	buffers = other.buffers;
 	bufferLocations = other.bufferLocations;
 
-	other.buffers.count = 0;
+	initialized = false;
 	other.fd = -1;
 
 	return *this;
@@ -60,79 +63,114 @@ CameraError Camera::open() {
 }
 
 
-CameraError Camera::init(uint32_t pixelFormat, uint32_t field) {
-	struct v4l2_capability cap;			// This has struct because tells reader that v4l2_* are structs and not other types. Design choice.
+CameraError Camera::readDeviceCapabilities() { if (interruptedIoctl(fd, VIDIOC_QUERYCAP, &capabilities) == -1) { return Error::device_capabilities_unavailable; } return Error::none; }
 
-	// Get device capability information and get and set device format information.
+bool Camera::supportsVideoCapture() { return capabilities.cap & V4L2_CAP_VIDEO_CAPTURE; }
+bool Camera::supportsStreaming() { return capabilities.cap & V4L2_CAP_STREAMING; }
 
-	if (interruptedIoctl(fd, VIDIOC_QUERYCAP, &cap) == -1) { return CameraError::deviceQueryCap; }	// Get capability information from device.
-	if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) { return CameraError::deviceNoVideo; }	// See if device supports video.
-	if (!(cap.capabilities & V4L2_CAP_STREAMING)) { return CameraError::deviceNoStreaming; }	// See if device supports streaming with shared memory.
-	// NOTE: using mmap or userptr with V4L2 is supposed to be way faster than doing reads and writes to the dev file, which is why we're using mmap.
-	
-	bzero(&format, sizeof(format));				// TODO: I don't know if this is necessary. If it isn't, remove it.
+CameraError Camera::readPreferredFormat() {
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIOC_G_FMT, &format) == -1) { return CameraError::deviceGetFormat; }		// Get default format.
-	std::cout << format.fmt.pix.pixelformat << " " << format.fmt.pix.field << std::endl;
-	if (format.fmt.pix.pixelformat == V4L2_PIX_FMT_RGB32) { std::cout << "passed check" << std::endl; }
-	format.fmt.pix.pixelformat = pixelFormat;								// Change to our liking.
-	format.fmt.pix.field = field;
-	if (interruptedIoctl(fd, VIDIOC_S_FMT, &format) == -1) { return CameraError::deviceSetFormat; }
-	// If driver changed one of our changes, it doesn't support it.
-	if (format.fmt.pix.pixelformat != pixelFormat || format.fmt.pix.field != field) { return CameraError::deviceFormatUnsupported; }
-	// If nothing was changed, then format is a valid representation of the current device format, so no need to get anything else.
+	if (interruptedIoctl(fd, VIDIOC_G_FMT, &format) == -1) { return Error::device_format_unavailable; }
+	return Error::none;
+}
 
-	// Initialize shared memory.
-	
-	buffers.count = 1;				// Try to use just a single buffer because that works better for real-time stuff.
-	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &buffers) == -1) { if (errno == EINVAL) { return CameraError::deviceNoMMap; } return CameraError::deviceRequestBuffer; }
-	if (buffers.count == 0) { return CameraError::deviceInsufficientMemory; }
+Error Camera::tryFormat() {
+	if (interruptedIoctl(fd, VIDIOC_TRY_FMT, &format) == -1) { return Error::device_format_unavailable; }
+	return Error::none;
+}
+
+CameraError Camera::init(v4l2_format& format) {
+	if (initialized) { return Error::not_freed; }			// don't allow initialization before freeing previous initialization
+
+	// See if the camera supports capture and streaming. Necessary for capturing images through mmap.
+
+	Error err = readDeviceCapabilities();
+	if (err != Error::none) { return err; }
+
+	if (!supportsVideoCapture()) { return Error::device_video_capture_unsupported; }
+	if (!supportsStreaming()) { return Error::device_streaming_unsupported; }
+
+	// negotiate device format
+
+	if (interruptedIoctl(fd, VIDIOC_S_FMT, &format) == -1) { return Error::invalid_format_type; }
+	if (format != ::format) { return Error::format_unsupported; }
+	// If the check didn't fail, the format was set on the device, so we can continue.
+
+	// initialize device buffers and set up shared memory access
+
+	if (buffers.count == 0) { buffers.count = 1; }
+	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &buffers) == -1) { return Error::device_buffer_request_failed; }
+	if (buffers.count == 0) { return Error::device_out_of_memory; }
+
 	bufferLocations = (BufferLocation*)calloc(buffers.count, sizeof(BufferLocation));
-	if (!bufferLocations) { return CameraError::userInsufficientMemory; }
-	for (int i = 0; i < buffers.count; i++) {	// TODO: If we're only using the first bufferLocation anyway, why set all of them. MMap all locations of course, because we have to, but why are we putting them in our user-side buffer. Don't do that if you don't have to. If that works, don't have an array in the first place.
+	if (!bufferLocations) { err = CameraError::user_out_of_memory; goto freeDeviceBuffersAndReturnError; }
+
+	int i = 0;				// TODO: This needs to be moved up because goto and stack.
+	for (; i < buffers.count; i++) {
 		struct v4l2_buffer buf;
 		bzero(&buf, sizeof(buf));
-		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		buf.memory = V4L2_MEMORY_MMAP;
 		buf.index = i;
-		
-		if (interruptedIoctl(fd, VIDIOC_QUERYBUF, &buf) == -1) { return CameraError::deviceQueryBuf; }
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-		bufferLocations[i].size = buf.length;
+		if (interruptedIoctl(fd, VIDIOC_QUERYBUF, &buf) == -1) { err = Error::device_buffer_query_failed; goto freeAndReturnError; }
+
 		bufferLocations[i].start = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
-		if (bufferLocations[i].start == MAP_FAILED) { return CameraError::mMapFailed; }
+		if (bufferLocations[i].start == MAP_FAILED) { err = Error::mmap_failed; goto freeAndReturnError; }
+		bufferLocations[i].size = buf.length;
 	}
 
+	initialized = true;
 	return CameraError::none;
+
+freeAndReturnError:
+	// try to free the mmaps that didn't fail
+	for (int j = 0; j < i; j++) { munmap(bufferLocations[j].start, bufferLocations[j].size); }	// no need to handle error here
+	delete[] bufferLocations;
+freeDeviceBuffersAndReturnError:
+	buffers.count = 0;
+	interruptedIoctl(fd, VIDIOC_REQBUFS, &buffers);
+	return err;
+}
+
+CameraError Camera::init(uint32_t pixelFormat, uint32_t field) {
+	Error err = readPreferredFormat();
+	if (err != Error::none) { return err; }
+	format.fmt.pix.pixelformat = pixelFormat;
+	format.fmt.pix.field = field;
+	return init(format);
 }
 
 CameraError Camera::init() { return init(V4L2_PIX_FMT_RGB24, V4L2_FIELD_NONE); }
 
-// NOTE: We would have to worry about the capture standard if we weren't using a modern, digital camera. Since we are, we can set the FPS to whatever we want.
-CameraError Camera::setFPS(uint32_t FPS) {
-	struct v4l2_streamparm parm;
-	bzero(&parm, sizeof(parm));
-	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIOC_G_PARM, &parm) == -1) { return CameraError::deviceGetParm; }
-	if (parm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) {
-		parm.parm.capture.timeperframe.numerator = 1;
-		parm.parm.capture.timeperframe.denominator = FPS;
-		if (interruptedIoctl(fd, VIDIOC_S_PARM, &parm) == -1) { return CameraError::deviceSetParm; }
-		return CameraError::none;
+Error Camera::readStreamingParameters() {
+	bzero(&streamingParameters, sizeof(streamingParameters));
+	streamingParameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (interruptedIoctl(fd, VIDIOC_G_PARM, &streamingParameters) == -1) { return Error::device_streaming_parameters_unavailable; }
+	return Error::none;
+}
+
+// NOTE: We would have to worry about the capture standard if we were supporting old devices, modern, digital devices (webcams, etc...) don't have v4l2 standards.
+// NOTE: Capture standards set a minimum timePerFrame, which, following the above, we don't have to worry about here.
+// NOTE: Device itself may limit (upper and lower) the timePerFrame, setting invalid values to their nearest valid values.
+CameraError Camera::setTimePerFrame(uint32_t numerator, uint32_t denominator) {
+	Error err = readStreamingParameters();
+	if (err != Error::none) { return err; }
+	if (streamingParameters.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) {
+		streamingParameters.parm.capture.timeperframe.numerator = numerator;
+		parmamingParameters.parm.capture.timeperframe.denominator = denominator;
+		if (interruptedIoctl(fd, VIDIOC_S_PARM, &parm) == -1) { return Error::device_set_streaming_parameters_failed; }
+		return Error::none;
 	}
-	return CameraError::deviceNoCustomFPS;
+	return Error::device_custom_timeperframe_unsupported;
 }
 
-uint32_t Camera::getFPS(CameraError& error) {
-	struct v4l2_streamparm parm;
-	bzero(&parm, sizeof(parm));
-	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIOC_G_PARM, &parm) == -1) { error = CameraError::deviceGetParm; return 0; }
-	error = CameraError::none;
-	return parm.parm.capture.timeperframe.denominator / parm.parm.capture.timeperframe.numerator;
+Error Camera::getTimePerFrame(uint32_t& numerator, uint32_t& denominator) {
+	Error err = readStreamingParameters();
+	if (err != Error::none) { return err; }
+	numerator = streamingParameters.parm.capture.timeperframe.numerator;
+	denominator = streamingParameters.parm.capture.timeperframe.denominator;
+	return Error::none;
 }
-
-uint32_t Camera::getFPS() { CameraError error; return getFPS(error); }
 
 CameraError Camera::start() {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
