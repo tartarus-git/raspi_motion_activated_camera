@@ -37,7 +37,7 @@ public:
 		userShootPoll = -26
 	};
 
-	struct BufferLocation { void* start; size_t size; };
+	struct BufferLocation { void* start; size_t size; bool queued; };
 
 	const char* deviceName;
 	int fd;
@@ -45,8 +45,10 @@ public:
 	struct v4l2_capability capabilities;					// NOTE: Struct is included so as to know that v4l2_* is a struct. Design choice.
 	struct v4l2_format format;
 	
-	struct v4l2_requestbuffers buffers;
+	struct v4l2_requestbuffers bufferMetadata;
 	bool initialized = false;
+
+	struct v4l2_buffer bufferData;
 
 	struct v4l2_streamparm streamingParameters;
 
@@ -81,6 +83,11 @@ public:
 	Error getTimePerFrame(uint32_t numerator, uint32_t denominator);			// getFPS only yields round FPS values. If FPS is non-integer, rounds down.
 
 	CameraError start();					// Needs to run after open() and after init(). TODO: See if setFPS can be run after start correctly.
+
+	Error queueAllFrames();
+	Error dequeueAllFrames();
+
+	Error dequeueAllQueuedFrames();
 
 	CameraError shootFrame();
 

@@ -34,6 +34,9 @@ Camera::Camera(const char* deviceName) : deviceName(deviceName) {
 	bzero(&buffers, sizeof(buffers));
 	buffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	buffers.memory = V4L2_MEMORY_MMAP;
+	bzero(&buf, sizeof(buf));
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
 }
 
 Camera& Camera::operator=(Camera&& other) {
@@ -105,18 +108,13 @@ CameraError Camera::init(v4l2_format& format) {
 	bufferLocations = (BufferLocation*)calloc(buffers.count, sizeof(BufferLocation));
 	if (!bufferLocations) { err = CameraError::user_out_of_memory; goto freeDeviceBuffersAndReturnError; }
 
-	int i = 0;				// TODO: This needs to be moved up because goto and stack.
-	for (; i < buffers.count; i++) {
-		struct v4l2_buffer buf;
-		bzero(&buf, sizeof(buf));
-		buf.index = i;
-		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
+	for (buf.index = 0; buf.index < buffers.count; buf.index++) {
 		if (interruptedIoctl(fd, VIDIOC_QUERYBUF, &buf) == -1) { err = Error::device_buffer_query_failed; goto freeAndReturnError; }
 
 		bufferLocations[i].start = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
 		if (bufferLocations[i].start == MAP_FAILED) { err = Error::mmap_failed; goto freeAndReturnError; }
 		bufferLocations[i].size = buf.length;
+		bufferLocations[i].queued = false;
 	}
 
 	initialized = true;
@@ -124,7 +122,7 @@ CameraError Camera::init(v4l2_format& format) {
 
 freeAndReturnError:
 	// try to free the mmaps that didn't fail
-	for (int j = 0; j < i; j++) { munmap(bufferLocations[j].start, bufferLocations[j].size); }	// no need to handle error here
+	for (int i = 0; i < buf.index; i++) { munmap(bufferLocations[i].start, bufferLocations[i].size); }	// no need to handle error here
 	delete[] bufferLocations;
 freeDeviceBuffersAndReturnError:
 	buffers.count = 0;
@@ -174,43 +172,93 @@ Error Camera::getTimePerFrame(uint32_t& numerator, uint32_t& denominator) {
 
 CameraError Camera::start() {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIOC_STREAMON, &type) == -1) { return CameraError::deviceStart; }
+	if (interruptedIoctl(fd, VIDIOC_STREAMON, &type) == -1) { return Error::device_start_failed; }
 	return CameraError::none;
 }
 
+// NOTE: Put this somewhere nice-looking: You can queue all you want to, even before starting the stream, they just wont get processed before starting the stream.
+Error Camera::queueAllFrames() {
+	for (bufferData.index = 0; bufferData.index < bufferMetadata.count; bufferData.index++) {
+		if (interruptedIoctl(fd, VIDIOC_QBUF, &bufferData) == -1) { return Error::device_queue_buffer_failed; }
+		bufferLocations[bufferData.index].queued = true;
+	}
+	return Error::none;
+}
+
+Error Camera::dequeueAllFrames() {
+	for (unsigned int i = 0; i < bufferMetadata.count; i++) {
+		if (poll(&pollStruct, 1, -1) == -1) { return Error::poll_failed; }
+		if (pollStruct.revents & POLLERR) { return Error::poll_failed; }		// TODO: Make sure this is necessary.
+		if (interruptedIoctl(fd, VIDIOC_DQBUF, &bufferData) == -1) { return Error::device_dequeue_buffer_failed; }
+		bufferLocations[bufferData.index].queued = false;
+	}
+	return Error::none;
+}
+
+Error Camera::dequeueAllQueuedFrames() {
+	unsigned int extraQueuedBuffers = 0;
+	for (unsigned int i = 0; i < bufferMetadata.count; i++) {
+		if (bufferLocations[i].queued) {
+			if (poll(&pollStruct, 1, -1) == -1) { return Error::poll_failed; }
+			if (pollStruct.revents & POLLERR) { return Error::poll_failed; }		// TODO: Make sure this is necessary.
+			if (interruptedIoctl(fd, VIDIOC_DQBUF, &bufferData) == -1) { return Error::device_dequeue_buffer_failed; }
+			if (bufferData.index == i) { bufferLocations[i].queued = false; continue; }
+			bufferLocations[buf.index].queued = false;
+			extraQueuedBuffers++;
+		}
+	}
+	for (unsigned int i = 0; i < extraQueuedBuffers; i++) {
+		if (poll(&pollStruct, 1, -1) == -1) { return Error::poll_failed; }
+		if (pollStruct.revents & POLLERR) { return Error::poll_failed; }		// TODO: Make sure this is necessary.
+		if (interruptedIoctl(fd, VIDIOC_DQBUF, &buf) == -1) { return Error::device_dequeue_buffer_failed; }
+		bufferLocations[buf.index].queued = false;
+	}
+	return Error::none;
+}
+
 CameraError Camera::shootFrame() {
-	struct v4l2_buffer buf;			// TODO: Does it make sense to keep creating new ones of these? Can this be optimized? If so, do that.
-	bzero(&buf, sizeof(buf));
-	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	buf.memory = V4L2_MEMORY_MMAP;
-	buf.index = 0;			// Always use the first one for this.
-	if (interruptedIoctl(fd, VIDIOC_QBUF, &buf) == -1) { return CameraError::deviceShootQBuf; }
-	// TODO: Does buf.index = 0 being set here make a difference for DQBUF?
-	if (poll(&pollStruct, 1, -1) == -1) { return CameraError::userShootPoll; }
-	if (pollStruct.revents & POLLERR) { return CameraError::userShootPoll; }
-	if (interruptedIoctl(fd, VIDIOC_DQBUF, &buf) == -1) { return CameraError::deviceShootDQBuf; }
+	Error err = dequeueAllQueuedFrames();
+	if (err != Error::none) { return err; }
+	bufferData.index = 0;
+	if (interruptedIoctl(fd, VIDIOC_QBUF, &bufferData) == -1) { return Error::device_queue_buffer_failed; }
+	bufferLocations[0].queued = true;
+	if (poll(&pollStruct, 1, -1) == -1) { return Error::poll_failed; }
+	if (pollStruct.revents & POLLERR) { return Error::poll_failed; }
+	if (interruptedIoctl(fd, VIDIOC_DQBUF, &bufferData) == -1) { return Error::device_dequeue_buffer_failed; }
+	bufferLocations[0].queued = false;
 	return CameraError::none;
 }
 
 CameraError Camera::stop() {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (interruptedIoctl(fd, VIDIOC_STREAMOFF, &type) == -1) { return CameraError::deviceStop; }
-	return CameraError::none;
+	if (interruptedIoctl(fd, VIDIOC_STREAMOFF, &type) == -1) { return Error::device_stop_failed; }
+	return Error::none;
 }
 
 CameraError Camera::free() {
 	if (buffers.count == 0) { return CameraError::none; }
+
+	Error err = stop();
+	if (err != Error::none) { return err; }
+
 	for (int i = 0; i < buffers.count; i++) { if (munmap(bufferLocations[i].start, bufferLocations[i].size) == -1) { return CameraError::mUnmapFailed; } }
 	delete[] bufferLocations;
-	buffers.count = 0;			// TODO: This whole setting count thing might be useless because driver cleans up after closing camera anyway, research.
-	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &buffers) == -1) { if (errno == EINVAL) { return CameraError::deviceNoMMap; } return CameraError::deviceRequestBuffer; }
+	// Temp code:
+	unsigned int tempCount = buffers.count;
+	buffers.count = 0;
+	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &buffers) == -1) { buffers.count = tempCount; if (errno == EINVAL) { return CameraError::deviceNoMMap; } return CameraError::deviceRequestBuffer; }
 	if (buffers.count != 0) { return CameraError::deviceMemFree; }
 	return CameraError::none;
 }
 
 CameraError Camera::close() {
 	if (fd == -1) { return CameraError::cannotClose; }
-	free();
+	// NOTE: The fact that free() frees the device buffers is useless here because closing fd does it anyway. I'm leaving it in free() to make calling free() directly
+	// possible. Making close() a special case, where freeing the buffers is avoided because of redundancy, isn't worth it in my opinion.
+	// Plus, it might not even improve performance or make the slightest amount of difference because the driver probably checks if the buffers are freed.
+	// If they are, like we're doing right now, the driver probably skips unnecessary work.
+	Error err = free();
+	if (err != Error::none) { return err; }
 	if (::close(fd) == -1) { fd = -1; return CameraError::cannotClose; }
 	fd = -1;
 	return CameraError::none;
