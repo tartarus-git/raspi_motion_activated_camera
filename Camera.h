@@ -66,7 +66,7 @@ public:
 		status_info_unavailable
 	};
 
-	struct BufferLocation { void* start; size_t size; bool queued; };
+	static const char* getErrorMessage(Error cameraError, int errnoValue);
 
 	const char* deviceName;
 	int fd;
@@ -86,11 +86,9 @@ public:
 	// TODO: maybe add ifdefs around this getErrorMessage stuff in case the user doesn't want all of that const char* storage in his executable.
 	const char* getErrorMessage(Error cameraError, int errno);
 
-	BufferLocation* frameLocations;
+	struct BufferLocation { void* start; size_t size; bool queued; }* frameLocations;
 
 	Camera(const char* deviceName);
-
-	const char* getErrorMessage(Error cameraError, int errnoValue);
 
 	Camera& operator=(Camera&& other);
 	Camera(Camera&& other);
@@ -98,16 +96,23 @@ public:
 	Camera(const Camera& other) = delete;					// NOTE: This gets done implicitly since I've declared move functions, doing it anyway, design choice.
 	Camera& operator=(const Camera& other) = delete;
 
+	// open device file and set pollStruct file descriptor
 	Error open();
 
-	Error readCapabilities();				// Fills the capabilities structure. init() does this as well, no need to call both.
-	bool supportsVideoCapture();
-	bool supportsStreaming();
+	// Reads device capabilities and fills capabilities struct. init() does this as well, no need to call both.
+	Error readCapabilities();
+	
+	bool supportsVideoCapture();			// returns true if device supports video capture, otherwise returns false
+	bool supportsStreaming();			// returns true if device supports streaming (queueing and dequeueing buffers in shared memory), otherwise returns false
 
+	// Reads the device's preferred format and fills the format struct. init(uint32_t, uint32_t) and defaultInit() do this as well, no need to call both.
 	Error readPreferredFormat();
+	// Asks the device if the format in the format struct is acceptable. If it isn't, device changes format struct to nearest valid configuration. If it is, format struct stays the way it is.
 	Error tryFormat();
 
+	// Try to use format data in format struct to initialize device format. Also initialize device buffers and initialize shared memory access using mmap.
 	Error init();
+	// TODO: Add function descriptions to the rest of all these, order them in the header and in the implementation files, and go through the whole thig with principles in mind, then make main.cpp acceptable and write a small test program. Save the test capture as ppm because it's easy.
 	Error init(uint32_t pixelFormat, uint32_t field);	// Needs to run after open().
 	Error defaultInit();
 

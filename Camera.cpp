@@ -17,7 +17,15 @@
 
 #include <linux/videodev2.h>
 
-// TODO: Go through everything and check that your removal of bzero at some parts hasn't damaged setting reserved fields to zero, which is a requirement.
+// TODO: See if you can change contents of const char* by casting to char*
+const char* Camera::getErrorMessage(Error cameraError, int errnoValue) {
+	switch (cameraError) {
+	case Error::none: return nullptr;
+	case Error::status_info_unavailable: return "failed to get device file status info";
+	case Error::file_is_not_device: return "the specified file does not represent a device";
+					// TODO: etc...
+	}
+}
 
 int interruptedIoctl(int fd, unsigned long request, void* argp) {
 	int returnValue;
@@ -30,12 +38,15 @@ Camera::Camera(const char* deviceName) : deviceName(deviceName) {
 	bzero(&bufferMetadata, sizeof(bufferMetadata));
 	bufferMetadata.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	bufferMetadata.memory = V4L2_MEMORY_MMAP;
+
 	bzero(&bufferData, sizeof(bufferData));
 	bufferData.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	bufferData.memory = V4L2_MEMORY_MMAP;
+
+	pollStruct.events = POLLIN;
 }
 
-Camera& Camera::operator=(Camera&& other) {
+Camera& Camera::operator=(Camera&& other) {			// TODO: Make sure all necessary fields are getting copied here and you didn't forget anything.
 	deviceName = other.deviceName;
 	fd = other.fd;
 	capabilities = other.capabilities;
@@ -54,16 +65,6 @@ Camera& Camera::operator=(Camera&& other) {
 
 Camera::Camera(Camera&& other) { *this = std::move(other); }
 
-// TODO: See if you can change contents of const char* by casting to char*
-const char* Camera::getErrorMessage(Error cameraError, int errnoValue) {
-	switch (cameraError) {
-	case Error::none: return nullptr;
-	case Error::status_info_unavailable: return "failed to get device file status info";
-	case Error::file_is_not_device: return "the specified file does not represent a device";
-					// TODO: etc...
-	}
-}
-
 Camera::Error Camera::open() {
 	struct stat st;					// I think struct is necessary here because compiler interprets as stat() function otherwise.
 	if (stat(deviceName, &st) == -1) { return Error::status_info_unavailable; }
@@ -71,7 +72,6 @@ Camera::Error Camera::open() {
 	fd = ::open(deviceName, O_RDWR | O_NONBLOCK);
 	if (fd == -1) { return Error::file_open_failed; }
 	pollStruct.fd = fd;
-	pollStruct.events = POLLIN;
 	return Error::none;
 }
 
