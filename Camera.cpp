@@ -77,7 +77,7 @@ Camera& Camera::operator=(Camera&& other) {
 
 Camera::Camera(Camera&& other) { *this = std::move(other); }
 
-Camera::Error Camera::open() {
+Camera::Error Camera::open() {		// TODO: Make this check for fd not being -1. Make fd be -1 by default, just like initialized.
 	struct stat st;					// I think struct is necessary here because compiler interprets as stat() function otherwise.
 	if (stat(deviceName, &st) == -1) { return Error::status_info_unavailable; }
 	if (!S_ISCHR(st.st_mode)) { return Error::file_is_not_device; }
@@ -96,7 +96,7 @@ Camera::Error Camera::readCapabilities() { if (interruptedIoctl(fd, VIDIOC_QUERY
 bool Camera::supportsVideoCapture() { return capabilities.capabilities & V4L2_CAP_VIDEO_CAPTURE; }
 bool Camera::supportsStreaming() { return capabilities.capabilities & V4L2_CAP_STREAMING; }
 
-Camera::Error Camera::readPreferredFormat() {
+Camera::Error Camera::readPreferredFormat() {			// TODO: Make sure this actually is the preferred format. Maybe it's just the currently set format.
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (interruptedIoctl(fd, VIDIOC_G_FMT, &format) == -1) { return Error::device_format_unavailable; }
 	return Error::none;
