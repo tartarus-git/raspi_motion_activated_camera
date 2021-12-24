@@ -6,38 +6,49 @@
 
 class Camera {
 public:
-	enum class Error {			// TODO: These errors need to have the correct numbers, already sorted though.
-		none = 0,
-		status_info_unavailable = -1,
-		file_is_not_device = -2,
-		file_open_failed = -3,
-		device_capabilities_unavailable = -4,
-		device_format_unavailable = -5,
-		not_freed = -6,
-		device_video_capture_unsupported = -7,
-		device_streaming_unsupported = -8,
-		invalid_format_type = -9,
-		format_unsupported = -10,
-		device_buffer_request_failed = -11,
-		device_out_of_memory = -12,
-		user_out_of_memory = -13,
-		device_buffer_query_failed = -14,
-		mmap_failed = -15,
-		device_streaming_parameters_unavailable = -16,
-		device_set_streaming_parameters_failed = -17,
-		device_custom_timeperframe_unsupported = -18,
-		device_start_failed = -19,
-		device_queue_buffer_failed = -20,
-		poll_failed = -21,
-		stream_not_started = 1,
-		device_dequeue_buffer_failed = -22,
-		device_stop_failed = -23,
-		already_freed = -24,
-		munmap_failed = -25,
-		device_mmap_unsupported = -26,
-		device_request_buffers_failed = -27,
-		already_closed = -28,
-		file_close_failed = -29
+	// Simulation of a scoped enum which, contrary to normal scoped enums, can be implicitly converted to integral types.
+	struct Error {
+		enum ErrorValue {
+			none = 0,
+			status_info_unavailable = -1,
+			file_is_not_device = -2,
+			file_open_failed = -3,
+			device_capabilities_unavailable = -4,
+			device_format_unavailable = -5,
+			not_freed = -6,
+			device_video_capture_unsupported = -7,
+			device_streaming_unsupported = -8,
+			invalid_format_type = -9,
+			format_unsupported = -10,
+			device_buffer_request_failed = -11,
+			device_out_of_memory = -12,
+			user_out_of_memory = -13,
+			device_buffer_query_failed = -14,
+			mmap_failed = -15,
+			device_streaming_parameters_unavailable = -16,
+			device_set_streaming_parameters_failed = -17,
+			device_custom_timeperframe_unsupported = -18,
+			device_start_failed = -19,
+			device_queue_buffer_failed = -20,
+			poll_failed = -21,
+			dequeue_frame_impossible = -22,
+			device_dequeue_buffer_failed = -23,
+			device_stop_failed = -24,
+			already_freed = -25,
+			munmap_failed = -26,
+			device_mmap_unsupported = -27,
+			device_request_buffers_failed = -28,
+			already_closed = -29,
+			file_close_failed = -30
+		};
+
+	private: ErrorValue value;
+	public:
+		 Error(ErrorValue value) noexcept;	// Takes care of assignment operator too because ErrorValue is converted to Error first and then assigned.
+		 operator int() const noexcept;		// Takes care of other integral types as well because resulting int can be implicitly converted to those.
+
+		 // You'll still be able to do stuff like Camera::Error::ErrorValue x = Camera::Error::ErrorValue::status_info_unavailable.
+		 // AFAIK, there is no way to avoid that, which sucks because that is not how the Camera::Error scoped enum would behave, but it is what it is.
 	};
 
 	const char* deviceName;
@@ -50,16 +61,17 @@ public:
 	
 	struct v4l2_requestbuffers bufferMetadata;
 	uint32_t lastBufferIndex;
+	uint32_t queuedFramesCount;
 	bool initialized = false;
 
 	struct v4l2_buffer bufferData;
 
-	struct BufferLocation { void* start; size_t size; bool queued; }* frameLocations;
+	struct BufferLocation { void* start; size_t size; }* frameLocations;
 
 	struct v4l2_streamparm streamingParameters;
 
-	Camera(const char* deviceName);
-
+	explicit Camera(const char* deviceName);				// NOTE: Explicit keyword prevents this from being used as a converting constructor.
+										// Without this, one could pass "/dev/video0" into a Camera parameter, which doesn't look good in my opinion.
 	Camera& operator=(Camera&& other);
 	Camera(Camera&& other);
 
@@ -83,6 +95,9 @@ public:
 	// initialization must be performed after opening device
 
 	// Try to use format data in format struct to initialize device format. Also initialize device buffers and initialize shared memory access using mmap.
+	// If bufferMetadata.count is 0 while calling this function, init() tries to allocate a single buffer. If bufferMetadata.count isn't 0, init() tries to allocate
+	// bufferMetadata.count buffers. The amount of actually allocated buffers (which can be lower or 0 if the device runs out of memory, or higher if the device 
+	// requires a certain amount of buffers to function properly) is stored in bufferMetadata.count after the function returns.
 	Error init();
 	// TODO: Add function descriptions to the rest of all these, order them in the header and in the implementation files, and go through the whole thig with principles in mind, then make main.cpp acceptable and write a small test program. Save the test capture as ppm because it's easy.
 	// Same function as init(), except that it reads the device's preferred format, changes the pixelformat and field options to the specified values, and then initializes the device with the resulting format.
@@ -100,31 +115,32 @@ public:
 	Error setTimePerFrame(uint32_t numerator, uint32_t denominator);			// Needs to run after open(), can run before init().
 	Error getTimePerFrame(uint32_t& numerator, uint32_t& denominator);			// getFPS only yields round FPS values. If FPS is non-integer, rounds down.
 
-	// Start streaming. Needs to be called after opening and initializing the device.
+	// Start streaming. Needs to be called after opening and initializing the device. Can be called n-times before stop().
+	// If that is the case, the function has no effects and doesn't return an error.
 	Error start();
 
 	// Frames can be queued before calling start(), they just won't get filled before calling start().
-	// dequeueFrame() and dequeueAllFrames() will infinitely hang if called before start(). dequeueAllQueuedFrames() won't unless frames were queued before start().
 
 	// Queue the frame at bufferData.index. Increments bufferData.index.
 	Error queueFrame();
 
 	// Dequeue the frame that was finished the earliest. Sets bufferData.index to the index of the newly dequeued frame.
+	// If called before start() or called when no frames are queued, returns Error::dequeue_frame_impossible.
 	Error dequeueFrame();
 
 	// Queue all frames. bufferData.index equals 0 after function returns.
 	Error queueAllFrames();
 
-	// Dequeue all frames. bufferData.index is set to the index of the last frame that was dequeued. Infinitely hangs if one of the frames wasn't queued.
+	// Dequeue all queued frames. bufferData.index is set to the index of the most recently dequeued frame.
+	// If called before start(), returns Error::dequeue_frame_impossible.
 	Error dequeueAllFrames();
 
-	// Dequeues only frames that were queued and thereby doesn't hang because of unqueued frames. This advantage over dequeueAllFrames() comes at the cost of more computation.
-	Error dequeueAllQueuedFrames();
-
-	// Shoot a single (new) frame. The resulting frame is as recent as possible. Calls dequeueAllQueuedFrames(), then queueFrame() and then dequeueFrame(), so it's not cheap.
+	// Shoot a single (new) frame. The resulting frame is as recent as possible. Calls dequeueAllFrames(), then queueFrame() and then dequeueFrame().
+	// Sets bufferData.index to the index of the frame that was used for the frame.
 	Error shootFrame();
 
-	// Stop streaming. All frames that haven't been dequeued yet are lost. Needs to be called after start().
+	// Stop streaming. This function is the counterpart to start(). All frames that haven't been dequeued yet are lost.
+	// stop() can be called before calling start(), it doesn't do anything and doesn't return an error. It does however cause all queued frames to be lost.
 	Error stop();
 
 	// Free device and user resources. This function is the counterpart to init(). Stops the stream if that hasn't been done already.

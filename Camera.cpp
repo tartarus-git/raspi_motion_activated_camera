@@ -1,4 +1,3 @@
-#include <iostream>
 #include "Camera.h"
 
 #include <stdlib.h>
@@ -17,6 +16,14 @@
 
 #include <linux/videodev2.h>
 
+// Camera::Error
+
+Camera::Error::Error(Camera::Error::ErrorValue value) noexcept : value(value) { }
+
+Camera::Error::operator int() const noexcept { return value; }
+
+// Camera
+
 // SIDE-NOTE: Can you modify a string literal? They're expressed as const char*, but (through casting to char*) can you modify them?
 // Answer: No, you can't. It would work out syntactically and the compiler would let you, but it isn't possible because string literals are stored in read-only memory.
 // Accessing them, even if C++ lets you, is undefined behaviour. I can imagine that it will probably end in a seg fault.
@@ -27,6 +34,13 @@
 int interruptedIoctl(int fd, unsigned long request, void* argp) {
 	int returnValue;
 	do { returnValue = ioctl(fd, request, argp); }
+	while (returnValue == -1 && errno == EINTR);
+	return returnValue;
+}
+
+int interruptedPoll(struct pollfd *fds, nfds_t nfds, int timeout) {
+	int returnValue;
+	do { returnValue = poll(fds, nfds, timeout); }
 	while (returnValue == -1 && errno == EINTR);
 	return returnValue;
 }
@@ -113,20 +127,21 @@ Camera::Error Camera::init() {
 	if (bufferMetadata.count == 0) { bufferMetadata.count = 1; }
 	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &bufferMetadata) == -1) { return Error::device_buffer_request_failed; }
 	if (bufferMetadata.count == 0) { return Error::device_out_of_memory; }
+	lastBufferIndex = bufferMetadata.count - 1;
 
 	frameLocations = (BufferLocation*)calloc(bufferMetadata.count, sizeof(BufferLocation));
 	if (!frameLocations) { err = Error::user_out_of_memory; goto freeDeviceBuffersAndReturnError; }
 
-	// TODO: See if for loop skips the first, useless comparison, or if we should use something else. Does it get optimized?
+	// NOTE: The first check that the for loop does is useless, I assume it'll get optimized out.
 	for (bufferData.index = 0; bufferData.index < bufferMetadata.count; bufferData.index++) {
 		if (interruptedIoctl(fd, VIDIOC_QUERYBUF, &bufferData) == -1) { err = Error::device_buffer_query_failed; goto freeAndReturnError; }
 		frameLocations[bufferData.index].start = mmap(nullptr, bufferData.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, bufferData.m.offset);
 		if (frameLocations[bufferData.index].start == MAP_FAILED) { err = Error::mmap_failed; goto freeAndReturnError; }
 		frameLocations[bufferData.index].size = bufferData.length;
-		frameLocations[bufferData.index].queued = false;
 	}
 	bufferData.index = 0;			// We do this so that queueFrame has a good starting point.
 						// We also HAVE to change it because without this line, bufferData.index equals bufferMetadata.count + 1.
+	queuedFramesCount = 0;
 	initialized = true;
 	return Error::none;
 
@@ -188,22 +203,24 @@ Camera::Error Camera::start() {
 
 Camera::Error Camera::queueFrame() {
 	if (interruptedIoctl(fd, VIDIOC_QBUF, &bufferData) == -1) { return Error::device_queue_buffer_failed; }
-	frameLocations[bufferData.index].queued = true;
+	queuedFramesCount++;
 	if (bufferData.index == lastBufferIndex) { bufferData.index = 0; return Error::none; }
 	bufferData.index++;
 	return Error::none;
 }
 
-// TODO: I think: if POLLERR is encountered, either you haven't started the stream or there is nothing queued and thereby nothing can be dequeued.
-// This is the behaviour that I think the docs are talking about, but you should defo test to see if those two scenarios get captured by what I have set as
-// stream_not_started at the moment. If that or statement is true, then I'll have to come up with a different error message for that I think.
-// You can potentially make a couple of the functions that have to do with queueing a lot better with this behaviour.
+// NOTE: If poll succeeds but sets POLLERR in pollStruct.revents, it could mean that there is nothing to dequeue.
+// It could also mean some other stuff, the documentation isn't very good in my opinion. The important thing is:
+// poll() doesn't always set POLLERR when there is nothing to dequeue, sometimes poll() will just hang.
+// To avoid this ever happening, we have to build our own system for keeping track of queued frames.
+// A counter will suffice.
 
 Camera::Error Camera::dequeueFrame() {
-	if (poll(&pollStruct, 1, -1) == -1) { return Error::poll_failed; }
-	if (pollStruct.revents & POLLERR) { return Error::stream_not_started; }
+	if (queuedFramesCount == 0) { return Error::dequeue_frame_impossible; }
+	if (interruptedPoll(&pollStruct, 1, -1) == -1) { return Error::poll_failed; }
+	if (pollStruct.revents & POLLERR) { return Error::dequeue_frame_impossible; }
 	if (interruptedIoctl(fd, VIDIOC_DQBUF, &bufferData) == -1) { return Error::device_dequeue_buffer_failed; }
-	frameLocations[bufferData.index].queued = false;
+	queuedFramesCount--;
 	return Error::none;
 }
 
@@ -215,25 +232,13 @@ Camera::Error Camera::queueAllFrames() {
 }
 
 Camera::Error Camera::dequeueAllFrames() {
-	for (uint32_t i = 0; i < bufferMetadata.count; i++) { Error err = dequeueFrame(); if (err != Error::none) { return err; } }
-	return Error::none;
-}
-
-Camera::Error Camera::dequeueAllQueuedFrames() {
-	unsigned int extraQueuedBuffers = 0;
-	for (unsigned int i = 0; i < bufferMetadata.count; i++) {
-		if (frameLocations[i].queued) {
-			Error err = dequeueFrame(); if (err != Error::none) { return err; }
-			if (!frameLocations[i].queued) { extraQueuedBuffers++; }
-		}
-	}
-	for (unsigned int i = 0; i < extraQueuedBuffers; i++) { Error err = dequeueFrame(); if (err != Error::none) { return err; } }
+	while (queuedFramesCount != 0) { Error err = dequeueFrame(); if (err != Error::none) { return err; } }
 	return Error::none;
 }
 
 Camera::Error Camera::shootFrame() {
-	Error err = dequeueAllQueuedFrames(); if (err != Error::none) { return err; }
-	bufferData.index = 0;
+	// NOTE: This doesn't throw anything if it encounters dequeue_frame_impossible because that just means that there are no more frames to dequeue, which is ok.
+	Error err = dequeueAllFrames(); if (err != Error::none && err != Error::dequeue_frame_impossible) { return err; }
 	err = queueFrame(); if (err != Error::none) { return err; }
 	err = dequeueFrame(); if (err != Error::none) { return err; }
 	return Error::none;
@@ -242,6 +247,7 @@ Camera::Error Camera::shootFrame() {
 Camera::Error Camera::stop() {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (interruptedIoctl(fd, VIDIOC_STREAMOFF, &type) == -1) { return Error::device_stop_failed; }
+	queuedFramesCount = 0;
 	return Error::none;
 }
 
