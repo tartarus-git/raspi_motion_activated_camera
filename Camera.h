@@ -15,32 +15,33 @@ public:
 			file_is_not_device = -3,
 			file_open_failed = -4,
 			device_capabilities_unavailable = -5,
-			device_cropping_capabilities_unavailable = -6,
-			device_crop_unavailable = -7,
-			device_format_unavailable = -8,
-			not_freed = -9,
-			device_video_capture_unsupported = -10,
-			device_streaming_unsupported = -11,
-			device_set_format_failed = -12,
-			format_unsupported = -13,
-			device_buffer_request_failed = -14,
-			device_out_of_memory = -15,
-			user_out_of_memory = -16,
-			device_buffer_query_failed = -17,
-			mmap_failed = -18,
-			device_streaming_parameters_unavailable = -19,
-			device_start_failed = -20,
-			device_frame_data_unavailable = -21,
-			device_queue_buffer_failed = -22,
-			dequeue_frame_impossible = -23,
-			poll_failed = -24,
-			device_dequeue_buffer_failed = -25,
-			device_stop_failed = -26,
-			already_freed = -27,
-			munmap_failed = -28,
-			device_mmap_unsupported = -29,
-			already_closed = -30,
-			file_close_failed = -31
+			device_cropping_unsupported = -6,
+			device_cropping_capabilities_unavailable = -7,
+			device_crop_unavailable = -8,
+			device_format_unavailable = -9,
+			not_freed = -10,
+			device_video_capture_unsupported = -11,
+			device_streaming_unsupported = -12,
+			device_set_format_failed = -13,
+			format_unsupported = -14,
+			device_buffer_request_failed = -15,
+			device_out_of_memory = -16,
+			user_out_of_memory = -17,
+			device_buffer_query_failed = -18,
+			mmap_failed = -19,
+			device_streaming_parameters_unavailable = -20,
+			device_start_failed = -21,
+			device_frame_data_unavailable = -22,
+			device_queue_buffer_failed = -23,
+			dequeue_frame_impossible = -24,
+			poll_failed = -25,
+			device_dequeue_buffer_failed = -26,
+			device_stop_failed = -27,
+			already_freed = -28,
+			munmap_failed = -29,
+			device_mmap_unsupported = -30,
+			already_closed = -31,
+			file_close_failed = -32
 		};
 
 	private: ErrorValue value;
@@ -106,6 +107,10 @@ public:
 
 	// changes the bounds of the crop struct and writes the resulting crop struct to device
 	Error writeCrop(int32_t left, int32_t top, int32_t width, int32_t bottom);
+
+	// Checks whether cropping is supported and, if so, sets crop to the default crop for the device and writes updated version to device.
+	// Returns an error only if something goes wrong. If the problem is only that cropping is unsupported, the function just doesn't do anything.
+	Error writeDefaultCropIfSupported();
 
 	// Reads the device's current format and fills the format struct. init(uint32_t, uint32_t) and defaultInit() do this as well, no need to call both.
 	Error readFormat();

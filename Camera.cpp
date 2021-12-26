@@ -110,7 +110,10 @@ bool Camera::supportsVideoCapture() const noexcept { return capabilities.capabil
 bool Camera::supportsStreaming() const noexcept { return capabilities.capabilities & V4L2_CAP_STREAMING; }
 
 Camera::Error Camera::readCroppingCapabilities() {
-	if (interruptedIoctl(fd, VIDIOC_CROPCAP, &croppingCapabilities) == -1) { return Error::device_cropping_capabilities_unavailable; }
+	if (interruptedIoctl(fd, VIDIOC_CROPCAP, &croppingCapabilities) == -1) {
+		if (errno == ENODATA) { return Error::device_cropping_unsupported; }
+		return Error::device_cropping_capabilities_unavailable;
+	}
 	return Error::none;
 }
 
@@ -126,6 +129,12 @@ Camera::Error Camera::writeCrop() {
 
 Camera::Error Camera::writeCrop(int32_t left, int32_t top, int32_t width, int32_t height) {
 	crop.c.left = left; crop.c.top = top; crop.c.width = width; crop.c.height = height;
+	return writeCrop();
+}
+
+Camera::Error Camera::writeDefaultCropIfSupported() {
+	Error err = readCroppingCapabilities(); if (err != Error::none) { return err == Error::device_cropping_unsupported ? Error::none : err; }
+	crop.c = croppingCapabilities.defrect;				// Set crop to the default crop for the device (covers the whole picture as per documentation).
 	return writeCrop();
 }
 
