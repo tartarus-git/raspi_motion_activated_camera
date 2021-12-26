@@ -1,6 +1,6 @@
 #include "Camera.h"
 
-#include <stdlib.h>
+#include <stdlib.h>			// TODO: Maybe check if all these headers are all necessary and what corresponds to what.
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -45,7 +45,15 @@ int interruptedPoll(struct pollfd *fds, nfds_t nfds, int timeout) {
 	return returnValue;
 }
 
-Camera::Camera(const char* deviceName) : deviceName(deviceName) {
+Camera::Camera(const char* deviceName) noexcept : deviceName(deviceName) {
+	pollStruct.events = POLLIN;
+
+	croppingCapabilities.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	crop.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	bzero(&format, sizeof(format));				// Doing this in case you never read format and write straight away. Reason: Device might have problems with non-zeroed raw_data field.
+	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
 	bzero(&bufferMetadata, sizeof(bufferMetadata));
 	bufferMetadata.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	bufferMetadata.memory = V4L2_MEMORY_MMAP;
@@ -54,20 +62,23 @@ Camera::Camera(const char* deviceName) : deviceName(deviceName) {
 	bufferData.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	bufferData.memory = V4L2_MEMORY_MMAP;
 
-	pollStruct.events = POLLIN;
+	bzero(&streamingParameters, sizeof(streamingParameters));
+	streamingParameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 }
 
-Camera& Camera::operator=(Camera&& other) {
+Camera& Camera::operator=(Camera&& other) noexcept {
 	deviceName = other.deviceName;
 	fd = other.fd;
 	capabilities = other.capabilities;
+	croppingCapabilities = other.croppingCapabilities;
+	crop = other.crop;
 	format = other.format;
 	bufferMetadata = other.bufferMetadata;
 	lastBufferIndex = other.lastBufferIndex;
+	queuedFramesCount = other.queuedFramesCount;
 	bufferData = other.bufferData;
-	streamingParameters = other.streamingParameters;
-
 	frameLocations = other.frameLocations;
+	streamingParameters = other.streamingParameters;
 
 	other.initialized = false;
 	other.fd = -1;
@@ -75,9 +86,11 @@ Camera& Camera::operator=(Camera&& other) {
 	return *this;
 }
 
-Camera::Camera(Camera&& other) { *this = std::move(other); }
+Camera::Camera(Camera&& other) noexcept { *this = std::move(other); }
 
-Camera::Error Camera::open() {		// TODO: Make this check for fd not being -1. Make fd be -1 by default, just like initialized.
+Camera::Error Camera::open() {
+	if (fd != -1) { return Error::not_closed; }
+
 	struct stat st;					// I think struct is necessary here because compiler interprets as stat() function otherwise.
 	if (stat(deviceName, &st) == -1) { return Error::status_info_unavailable; }
 	if (!S_ISCHR(st.st_mode)) { return Error::file_is_not_device; }
@@ -93,10 +106,30 @@ Camera::Error Camera::open() {		// TODO: Make this check for fd not being -1. Ma
 
 Camera::Error Camera::readCapabilities() { if (interruptedIoctl(fd, VIDIOC_QUERYCAP, &capabilities) == -1) { return Error::device_capabilities_unavailable; } return Error::none; }
 
-bool Camera::supportsVideoCapture() { return capabilities.capabilities & V4L2_CAP_VIDEO_CAPTURE; }
-bool Camera::supportsStreaming() { return capabilities.capabilities & V4L2_CAP_STREAMING; }
+bool Camera::supportsVideoCapture() const noexcept { return capabilities.capabilities & V4L2_CAP_VIDEO_CAPTURE; }
+bool Camera::supportsStreaming() const noexcept { return capabilities.capabilities & V4L2_CAP_STREAMING; }
 
-Camera::Error Camera::readPreferredFormat() {			// TODO: Make sure this actually is the preferred format. Maybe it's just the currently set format.
+Camera::Error Camera::readCroppingCapabilities() {
+	if (interruptedIoctl(fd, VIDIOC_CROPCAP, &croppingCapabilities) == -1) { return Error::device_cropping_capabilities_unavailable; }
+	return Error::none;
+}
+
+Camera::Error Camera::readCrop() {
+	if (interruptedIoctl(fd, VIDIOC_G_CROP, &crop) == -1) { return Error::device_crop_unavailable; }
+	return Error::none;
+}
+
+Camera::Error Camera::writeCrop() {
+	if (interruptedIoctl(fd, VIDIOC_S_CROP, &crop) == -1) { return Error::device_crop_unavailable; }
+	return readCrop();
+}
+
+Camera::Error Camera::writeCrop(int32_t left, int32_t top, int32_t width, int32_t height) {
+	crop.c.left = left; crop.c.top = top; crop.c.width = width; crop.c.height = height;
+	return writeCrop();
+}
+
+Camera::Error Camera::readFormat() {
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (interruptedIoctl(fd, VIDIOC_G_FMT, &format) == -1) { return Error::device_format_unavailable; }
 	return Error::none;
@@ -118,7 +151,9 @@ Camera::Error Camera::init() {
 	// negotiate device format
 
 	v4l2_format previousFormatState = format;
-	if (interruptedIoctl(fd, VIDIOC_S_FMT, &format) == -1) { return Error::invalid_format_type; }
+	// NOTE: Documentation says that -1 always means invalid format type. Thats wrong because same documentation says it can fail with EBUSY as well.
+	// I trust the second one because it makes way more sense, so thats what were doing. Plus, our format type shouldn't ever really be invalid anyway.
+	if (interruptedIoctl(fd, VIDIOC_S_FMT, &format) == -1) { return Error::device_set_format_failed; }
 	if (memcmp(&format, &previousFormatState, sizeof(v4l2_format)) != 0) { return Error::format_unsupported; }
 	// If the check didn't fail, the format was set on the device, so we can continue.
 
@@ -158,7 +193,7 @@ freeDeviceBuffersAndReturnError:
 }
 
 Camera::Error Camera::init(uint32_t pixelFormat, uint32_t field) {
-	Error err = readPreferredFormat(); if (err != Error::none) { return err; }
+	Error err = readFormat(); if (err != Error::none) { return err; }
 	format.fmt.pix.pixelformat = pixelFormat;
 	format.fmt.pix.field = field;
 	return init();
@@ -166,40 +201,44 @@ Camera::Error Camera::init(uint32_t pixelFormat, uint32_t field) {
 
 Camera::Error Camera::defaultInit() { return init(V4L2_PIX_FMT_RGB24, V4L2_FIELD_NONE); }
 
+// NOTE: We would have to worry about the capture standard if we were supporting old devices, modern, digital devices (webcams, etc...) don't have v4l2 standards.
+// Capture standards set a minimum timePerFrame, which, following the above, we don't have to worry about here.
+// Device itself may limit (upper and lower) the timePerFrame, setting invalid values to their nearest valid values.
+
 Camera::Error Camera::readStreamingParameters() {
-	bzero(&streamingParameters, sizeof(streamingParameters));
-	streamingParameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (interruptedIoctl(fd, VIDIOC_G_PARM, &streamingParameters) == -1) { return Error::device_streaming_parameters_unavailable; }
 	return Error::none;
 }
 
-// NOTE: We would have to worry about the capture standard if we were supporting old devices, modern, digital devices (webcams, etc...) don't have v4l2 standards.
-// Capture standards set a minimum timePerFrame, which, following the above, we don't have to worry about here.
-// Device itself may limit (upper and lower) the timePerFrame, setting invalid values to their nearest valid values.
-Camera::Error Camera::setTimePerFrame(uint32_t numerator, uint32_t denominator) {
-	Error err = readStreamingParameters(); if (err != Error::none) { return err; }
+bool Camera::supportsCustomTimePerFrame() const noexcept { return streamingParameters.parm.capture.capability & V4L2_CAP_TIMEPERFRAME; }
 
-	if (streamingParameters.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) {
-		streamingParameters.parm.capture.timeperframe.numerator = numerator;
-		streamingParameters.parm.capture.timeperframe.denominator = denominator;
-		if (interruptedIoctl(fd, VIDIOC_S_PARM, &streamingParameters) == -1) { return Error::device_set_streaming_parameters_failed; }
-		return Error::none;
-	}
-	return Error::device_custom_timeperframe_unsupported;
+void Camera::setTimePerFrame(uint32_t numerator, uint32_t denominator) noexcept {
+	streamingParameters.parm.capture.timeperframe.numerator = numerator;
+	streamingParameters.parm.capture.timeperframe.denominator = denominator;
 }
 
-Camera::Error Camera::getTimePerFrame(uint32_t& numerator, uint32_t& denominator) {
-	Error err = readStreamingParameters(); if (err != Error::none) { return err; }
+void Camera::getTimePerFrame(uint32_t& numerator, uint32_t& denominator) const noexcept {
 	numerator = streamingParameters.parm.capture.timeperframe.numerator;
 	denominator = streamingParameters.parm.capture.timeperframe.denominator;
+}
+
+Camera::Error Camera::writeStreamingParameters() {
+	if (interruptedIoctl(fd, VIDIOC_S_PARM, &streamingParameters) == -1) { return Error::device_streaming_parameters_unavailable; }
 	return Error::none;
 }
 
-Camera::Error Camera::start() {
+Camera::Error Camera::start() const {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (interruptedIoctl(fd, VIDIOC_STREAMON, &type) == -1) { return Error::device_start_failed; }
 	return Error::none;
 }
+
+Camera::Error Camera::readFrameData() {
+	if (interruptedIoctl(fd, VIDIOC_QUERYBUF, &bufferData) == -1) { return Error::device_frame_data_unavailable; }
+	return Error::none;
+}
+
+bool Camera::isFrameCorrupted() const noexcept { return bufferData.flags & V4L2_BUF_FLAG_ERROR; }
 
 Camera::Error Camera::queueFrame() {
 	if (interruptedIoctl(fd, VIDIOC_QBUF, &bufferData) == -1) { return Error::device_queue_buffer_failed; }
@@ -261,7 +300,7 @@ Camera::Error Camera::free() {
 	delete[] frameLocations;
 
 	bufferMetadata.count = 0;
-	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &bufferMetadata) == -1) { if (errno == EINVAL) { return Error::device_mmap_unsupported; } return Error::device_request_buffers_failed; }
+	if (interruptedIoctl(fd, VIDIOC_REQBUFS, &bufferMetadata) == -1) { if (errno == EINVAL) { return Error::device_mmap_unsupported; } return Error::device_buffer_request_failed; }
 
 	return Error::none;
 }

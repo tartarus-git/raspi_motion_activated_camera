@@ -10,36 +10,37 @@ public:
 	struct Error {
 		enum ErrorValue {
 			none = 0,
-			status_info_unavailable = -1,
-			file_is_not_device = -2,
-			file_open_failed = -3,
-			device_capabilities_unavailable = -4,
-			device_format_unavailable = -5,
-			not_freed = -6,
-			device_video_capture_unsupported = -7,
-			device_streaming_unsupported = -8,
-			invalid_format_type = -9,
-			format_unsupported = -10,
-			device_buffer_request_failed = -11,
-			device_out_of_memory = -12,
-			user_out_of_memory = -13,
-			device_buffer_query_failed = -14,
-			mmap_failed = -15,
-			device_streaming_parameters_unavailable = -16,
-			device_set_streaming_parameters_failed = -17,
-			device_custom_timeperframe_unsupported = -18,
-			device_start_failed = -19,
-			device_queue_buffer_failed = -20,
-			poll_failed = -21,
-			dequeue_frame_impossible = -22,
-			device_dequeue_buffer_failed = -23,
-			device_stop_failed = -24,
-			already_freed = -25,
-			munmap_failed = -26,
-			device_mmap_unsupported = -27,
-			device_request_buffers_failed = -28,
-			already_closed = -29,
-			file_close_failed = -30
+			not_closed = -1,
+			status_info_unavailable = -2,
+			file_is_not_device = -3,
+			file_open_failed = -4,
+			device_capabilities_unavailable = -5,
+			device_cropping_capabilities_unavailable = -6,
+			device_crop_unavailable = -7,
+			device_format_unavailable = -8,
+			not_freed = -9,
+			device_video_capture_unsupported = -10,
+			device_streaming_unsupported = -11,
+			device_set_format_failed = -12,
+			format_unsupported = -13,
+			device_buffer_request_failed = -14,
+			device_out_of_memory = -15,
+			user_out_of_memory = -16,
+			device_buffer_query_failed = -17,
+			mmap_failed = -18,
+			device_streaming_parameters_unavailable = -19,
+			device_start_failed = -20,
+			device_frame_data_unavailable = -21,
+			device_queue_buffer_failed = -22,
+			dequeue_frame_impossible = -23,
+			poll_failed = -24,
+			device_dequeue_buffer_failed = -25,
+			device_stop_failed = -26,
+			already_freed = -27,
+			munmap_failed = -28,
+			device_mmap_unsupported = -29,
+			already_closed = -30,
+			file_close_failed = -31
 		};
 
 	private: ErrorValue value;
@@ -52,11 +53,15 @@ public:
 	};
 
 	const char* deviceName;
-	int fd;
+	int fd = -1;
 
-	struct pollfd pollStruct;
+	struct pollfd pollStruct;						// NOTE: struct keyword not necessary, putting it in because design choice
 
-	struct v4l2_capability capabilities;					// NOTE: Struct is included so as to know that v4l2_* is a struct. Design choice.
+	struct v4l2_capability capabilities;
+
+	struct v4l2_cropcap croppingCapabilities;
+	struct v4l2_crop crop;
+
 	struct v4l2_format format;
 	
 	struct v4l2_requestbuffers bufferMetadata;
@@ -70,12 +75,12 @@ public:
 
 	struct v4l2_streamparm streamingParameters;
 
-	explicit Camera(const char* deviceName);				// NOTE: Explicit keyword prevents this from being used as a converting constructor.
-										// Without this, one could pass "/dev/video0" into a Camera parameter, which doesn't look good in my opinion.
-	Camera& operator=(Camera&& other);
-	Camera(Camera&& other);
+	explicit Camera(const char* deviceName) noexcept;				// NOTE: Explicit keyword prevents this from being used as a converting constructor.
+											// Without this, one could pass "/dev/video0" into a Camera parameter, which doesn't look good in my opinion.
+	Camera& operator=(Camera&& other) noexcept;
+	Camera(Camera&& other) noexcept;
 
-	Camera(const Camera& other) = delete;					// NOTE: This gets done implicitly since I've declared move functions, doing it anyway, design choice.
+	Camera(const Camera& other) = delete;						// NOTE: This gets done implicitly since I've declared move functions, doing it anyway, design choice.
 	Camera& operator=(const Camera& other) = delete;
 
 	// open device file and set pollStruct file descriptor
@@ -84,11 +89,26 @@ public:
 	// Reads device capabilities and fills capabilities struct. init() does this as well, no need to call both.
 	Error readCapabilities();
 	
-	bool supportsVideoCapture();			// returns true if device supports video capture, otherwise returns false
-	bool supportsStreaming();			// returns true if device supports streaming (queueing and dequeueing buffers in shared memory), otherwise returns false
+	bool supportsVideoCapture() const noexcept;					// returns true if device supports video capture, otherwise returns false
+	bool supportsStreaming() const noexcept;					// returns true if device supports streaming (queueing and dequeueing buffers in shared memory), otherwise returns false
 
-	// Reads the device's preferred format and fills the format struct. init(uint32_t, uint32_t) and defaultInit() do this as well, no need to call both.
-	Error readPreferredFormat();
+	// Changing cropping parameters can change what format (mainly width and height I think) the device deems acceptable. This is because of aspect ratio.
+	// Bottom line is: When negotiating cropping parameters and format scaling parameters, you should beware of the fact that one affects the other.
+
+	// reads device cropping capabilities and fills croppingCapabilities struct
+	Error readCroppingCapabilities();
+
+	// reads device crop state and fills crop struct
+	Error readCrop();
+
+	// writes crop state in crop struct to device
+	Error writeCrop();
+
+	// changes the bounds of the crop struct and writes the resulting crop struct to device
+	Error writeCrop(int32_t left, int32_t top, int32_t width, int32_t bottom);
+
+	// Reads the device's current format and fills the format struct. init(uint32_t, uint32_t) and defaultInit() do this as well, no need to call both.
+	Error readFormat();
 	// Asks the device if the format in the format struct is acceptable. If it isn't, device changes format struct to nearest valid configuration. If it is, format struct stays the way it is.
 	Error tryFormat();
 
@@ -99,27 +119,42 @@ public:
 	// bufferMetadata.count buffers. The amount of actually allocated buffers (which can be lower or 0 if the device runs out of memory, or higher if the device 
 	// requires a certain amount of buffers to function properly) is stored in bufferMetadata.count after the function returns.
 	Error init();
-	// TODO: Add function descriptions to the rest of all these, order them in the header and in the implementation files, and go through the whole thig with principles in mind, then make main.cpp acceptable and write a small test program. Save the test capture as ppm because it's easy.
-	// Same function as init(), except that it reads the device's preferred format, changes the pixelformat and field options to the specified values, and then initializes the device with the resulting format.
+	// Same function as init(), except that it reads the device's current format, changes the pixelformat and field options to the specified values, and then initializes the device with the resulting format.
 	Error init(uint32_t pixelFormat, uint32_t field);	// Needs to run after open().
 	// Same as init(uint32_t, uint32_t), except that it uses V4L2_PIX_FMT_RGB24 as pixelFormat and V4L2_FIELD_NONE as field.
 	Error defaultInit();
 
+	// Streaming parameter functions need to be called after opening device, but can be called before or after initializing device.
+	// Depending on the device, you may be able to call time per frame functions after starting stream as well.
+
 	// reads streaming parameters from device and fills streamingParameters struct
 	Error readStreamingParameters();
 
-	// Time per frame functions need to be called after opening device, but can be called before initializing device.
-	// Depending on the device, you may be able to call time per frame functions after starting stream as well.
+	// returns true if one can change the time per frame of the device, otherwise returns false
+	bool supportsCustomTimePerFrame() const noexcept;
 
-	// Try to set device's time per frame. Device might round to nearest acceptable value if one passes in a value that is deemed unacceptable.
-	Error setTimePerFrame(uint32_t numerator, uint32_t denominator);			// Needs to run after open(), can run before init().
-	Error getTimePerFrame(uint32_t& numerator, uint32_t& denominator);			// getFPS only yields round FPS values. If FPS is non-integer, rounds down.
+	// sets time per frame data in the streamingParameters struct
+	void setTimePerFrame(uint32_t numerator, uint32_t denominator) noexcept;
+
+	// gets time per frame data from the streamingParameters struct
+	void getTimePerFrame(uint32_t& numerator, uint32_t& denominator) const noexcept;
+
+	// Writes streaming parameters from streamingParameters struct into device. Device may change these to nearest valid values if it deems them invalid.
+	Error writeStreamingParameters();
 
 	// Start streaming. Needs to be called after opening and initializing the device. Can be called n-times before stop().
 	// If that is the case, the function has no effects and doesn't return an error.
-	Error start();
+	Error start() const;
 
 	// Frames can be queued before calling start(), they just won't get filled before calling start().
+	// readFrameData() can also be called before start().
+
+	// Queries the device for the frame data of the frame at bufferData.index. Fills bufferData with the data.
+	// This gets done in every queue/dequeue function, so you don't need to call this all the time.
+	Error readFrameData();
+
+	// Returns true if V4L2_BUF_FLAG_ERROR is set in the current bufferData. This means that you can continue operation as normal, but the current frame may be corrupted.
+	bool isFrameCorrupted() const noexcept;
 
 	// Queue the frame at bufferData.index. Increments bufferData.index.
 	Error queueFrame();

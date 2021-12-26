@@ -28,20 +28,24 @@ int main() {
 	else { std::cout << "open() failed with error code: " << (int)err << std::endl; }
 	std::cout << "press enter to try setting FPS before initializing camera" << std::endl;
 	std::cin.get();
-	err = camera.setTimePerFrame(1, 5);
-	if (err == Camera::Error::none) { std::cout << "setting FPS went fine" << std::endl; }
+	int Err = camera.readStreamingParameters();
+	camera.setTimePerFrame(1, 5);
+	Err |= camera.writeStreamingParameters();
+	if (Err == Camera::Error::none) { std::cout << "setting FPS went fine" << std::endl; }
 	else { std::cout << "error while settings FPS before init()" << std::endl; }
 	std::cout << "press enter to initialize camera" << std::endl;
 	std::cin.get();
-	camera.readPreferredFormat();
+	camera.readFormat();
 	err = camera.init();
 	if (err == Camera::Error::none) { std::cout << "initialization of camera was successful" << std::endl; }
 	else { std::cout << "initialization failed with error code: " << (int)err << std::endl; }
 	std::cout << "amount of buffers: " << camera.bufferMetadata.count << std::endl;
 	std::cout << "press enter to set FPS to 5 (potentially again, if the one before worked)" << std::endl;
 	std::cin.get();
-	err = camera.setTimePerFrame(1, 5);
-	if (err == Camera::Error::none) { std::cout << "setting FPS went fine" << std::endl; }
+	Err = camera.readStreamingParameters();
+	camera.setTimePerFrame(1, 5);
+	Err |= camera.writeStreamingParameters();
+	if (Err == Camera::Error::none) { std::cout << "setting FPS went fine" << std::endl; }
 	else { std::cout << "error while setting FPS after init()" << std::endl; }
 
 	std::cout << "because no alterations were made, camera is currently working with one frame buffer" << std::endl;
