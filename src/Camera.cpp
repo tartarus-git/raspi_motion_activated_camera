@@ -1,4 +1,4 @@
-#include "Camera.h"
+#include "../include/Camera.h"
 
 #include <stdlib.h>			// TODO: Maybe check if all these headers are all necessary and what corresponds to what.
 #include <sys/stat.h>
@@ -15,6 +15,8 @@
 #include <cstring>
 
 #include <linux/videodev2.h>
+
+using namespace vid;
 
 // Camera::Error
 

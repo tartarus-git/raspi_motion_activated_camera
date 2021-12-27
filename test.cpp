@@ -2,9 +2,11 @@
 #include <chrono>
 #include <ratio>
 
-#include "Camera.h"
+#include "include/Camera.h"
 
 #include <linux/videodev2.h>
+
+using namespace vid;
 
 int main() {
 
