@@ -63,5 +63,7 @@ namespace vid {
 
 		// closes the device file
 		Error close();
+
+		~Screen();
 	};
 }

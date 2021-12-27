@@ -65,3 +65,5 @@ Screen::Error Screen::close() {
 	fd = -1;
 	return Error::none;
 }
+
+Screen::~Screen() { close(); }
