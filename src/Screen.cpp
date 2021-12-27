@@ -2,6 +2,7 @@
 
 #include <sys/ioctl.h>
 #include <cerrno>
+#include <cstdint>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -24,6 +25,14 @@ int interruptedIoctl(int fd, unsigned long request, void* argp) {
 	while (returnValue == -1 && errno == EINTR);
 	return returnValue;
 }
+
+// NOTE: Commented some of these out, see header.
+//uint32_t Screen::virtualWidth() const noexcept { return variableInfo.xres_virtual; }
+//uint32_t Screen::virtualHeight() const noexcept { return variableInfo.yres_virtual; }
+uint32_t Screen::width() const noexcept { return variableInfo.xres; }
+uint32_t Screen::height() const noexcept { return variableInfo.yres; }
+//uint32_t Screen::xOffset() const noexcept { return variableInfo.xoffset; }
+//uint32_t Screen::yOffset() const noexcept { return variableInfo.yoffset; }
 
 Screen::Error Screen::open() {
 	if (fd != -1) { return Error::not_closed; }
@@ -51,7 +60,7 @@ Screen::Error Screen::free() {
 
 Screen::Error Screen::close() {
 	if (fd == -1) { return Error::already_closed; }
-	Error err = free(); if (err != Error::none) { return err; }
+	Error err = free(); if (err != Error::none && err != Error::already_freed) { return err; }
 	if (::close(fd) == -1) { fd = -1; return Error::file_close_failed; }
 	fd = -1;
 	return Error::none;
