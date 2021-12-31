@@ -2,7 +2,7 @@
 #include <chrono>
 #include <ratio>
 
-#include "include/Camera.h"
+#include "../include/Camera.h"
 
 #include <linux/videodev2.h>
 
